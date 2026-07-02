@@ -213,7 +213,7 @@ class SemanticViewDAO(BaseDAO[SemanticView], AbstractSemanticViewDAO):
         query = db.session.query(SemanticView)
         if not security_manager.can_access_all_datasources():
             perms = security_manager.user_view_menu_names("datasource_access")
-            query = query.outerjoin(
+            query = query.join(
                 SemanticLayer,
                 SemanticLayer.uuid == SemanticView.semantic_layer_uuid,
             ).filter(
