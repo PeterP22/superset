@@ -702,7 +702,14 @@ const AsyncSelect = forwardRef(
         const token = separators.find((token: string) =>
           pastedText.includes(token),
         );
-        const array = token ? uniq(pastedText.split(token)) : [pastedText];
+        const array = token
+          ? uniq(
+              pastedText
+                .split(token)
+                .map(s => s.trim())
+                .filter(Boolean),
+            )
+          : [pastedText.trim()].filter(Boolean);
         const values = (
           await Promise.all(array.map(item => getPastedTextValue(item)))
         ).filter(item => item !== undefined) as AntdLabeledValue[];
