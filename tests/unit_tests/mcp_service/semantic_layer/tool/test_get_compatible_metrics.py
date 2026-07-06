@@ -101,7 +101,7 @@ def _access_denied_exc(message: str = "Access denied") -> SupersetSecurityExcept
 
 @pytest.mark.asyncio
 async def test_get_compatible_metrics_builtin_happy_path(mcp_server: FastMCP) -> None:
-    """Builtin datasets return all metrics, ignoring the current selection."""
+    """Builtin datasets return all metrics, ignoring the current dimension selection."""
     mock_ds = _make_dataset(42)
 
     with patch("superset.daos.dataset.DatasetDAO.find_by_id", return_value=mock_ds):
@@ -116,6 +116,30 @@ async def test_get_compatible_metrics_builtin_happy_path(mcp_server: FastMCP) ->
     assert data["source"] == "builtin"
     names = {m["name"] for m in data["compatible_metrics"]}
     assert names == {"count", "revenue"}
+
+
+@pytest.mark.asyncio
+async def test_get_compatible_metrics_builtin_excludes_selected_metrics(
+    mcp_server: FastMCP,
+) -> None:
+    """Builtin datasets exclude metrics already in selected_metrics.
+
+    Regression test: previously all dataset metrics were returned unfiltered,
+    so already-selected metrics were suggested again as "compatible".
+    """
+    mock_ds = _make_dataset(42)
+
+    with patch("superset.daos.dataset.DatasetDAO.find_by_id", return_value=mock_ds):
+        async with Client(mcp_server) as client:
+            result = await client.call_tool(
+                "get_compatible_metrics",
+                {"request": {"dataset_id": 42, "selected_metrics": ["count"]}},
+            )
+        data = json.loads(result.content[0].text)
+
+    assert data["success"] is True
+    names = {m["name"] for m in data["compatible_metrics"]}
+    assert names == {"revenue"}
 
 
 @pytest.mark.asyncio

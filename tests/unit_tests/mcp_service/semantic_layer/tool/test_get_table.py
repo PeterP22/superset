@@ -262,3 +262,37 @@ async def test_get_table_external_view_access_denied(mcp_server: FastMCP) -> Non
 
     assert data["success"] is False
     assert data["error_type"] == "AccessDenied"
+
+
+@pytest.mark.asyncio
+async def test_get_table_external_time_range_without_dttm_validation_error(
+    mcp_server: FastMCP,
+) -> None:
+    """get_table rejects time_range on a view with no datetime dimension.
+
+    Regression test: previously this silently dropped the time filter and
+    ran an unfiltered query instead of erroring, which could return
+    incorrect data for a time-bounded request.
+    """
+    mock_view = _make_view(5)  # columns have no is_dttm=True column
+
+    with patch(
+        "superset.daos.semantic_layer.SemanticViewDAO.find_by_id",
+        return_value=mock_view,
+    ):
+        async with Client(mcp_server) as client:
+            result = await client.call_tool(
+                "get_table",
+                {
+                    "request": {
+                        "view_id": 5,
+                        "metrics": ["bookings"],
+                        "time_range": "Last 30 days",
+                    }
+                },
+            )
+        data = json.loads(result.content[0].text)
+
+    assert data["success"] is False
+    assert data["error_type"] == "ValidationError"
+    assert "no datetime dimension" in data["message"]

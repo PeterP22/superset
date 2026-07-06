@@ -22,11 +22,13 @@ from __future__ import annotations
 import importlib
 from collections.abc import Generator
 from types import ModuleType
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import call, MagicMock, Mock, patch
 
 import pytest
 from fastmcp import Client, FastMCP
 
+from superset.errors import ErrorLevel, SupersetError, SupersetErrorType
+from superset.exceptions import SupersetSecurityException
 from superset.mcp_service.app import mcp
 from superset.utils import json
 
@@ -87,6 +89,27 @@ def _make_dataset(dataset_id: int = 1) -> MagicMock:
     ds.metrics = [_make_metric("count"), _make_metric("revenue", "SUM(revenue)")]
     ds.columns = [_make_column("region"), _make_column("category")]
     return ds
+
+
+def _make_view(view_id: int = 5) -> MagicMock:
+    view = MagicMock()
+    view.id = view_id
+    view.name = f"view_{view_id}"
+    view.raise_for_access = MagicMock(return_value=None)
+    view.metrics = [_make_metric("bookings"), _make_metric("revenue", "SUM(revenue)")]
+    view.columns = [_make_column("listing__country_name"), _make_column("channel")]
+    view.get_compatible_dimensions = MagicMock(return_value=["listing__country_name"])
+    return view
+
+
+def _access_denied_exc(message: str = "Access denied") -> SupersetSecurityException:
+    return SupersetSecurityException(
+        SupersetError(
+            message=message,
+            error_type=SupersetErrorType.DATASOURCE_SECURITY_ACCESS_ERROR,
+            level=ErrorLevel.ERROR,
+        )
+    )
 
 
 @pytest.mark.asyncio
@@ -182,3 +205,101 @@ async def test_list_metrics_search_filter(mcp_server: FastMCP) -> None:
     metrics = data["metrics"]
     assert len(metrics) == 1
     assert metrics[0]["name"] == "revenue"
+
+
+@pytest.mark.asyncio
+async def test_list_metrics_external_access_denied(mcp_server: FastMCP) -> None:
+    """An explicit view_id lookup surfaces AccessDenied instead of InternalError."""
+    mock_view = _make_view(5)
+    mock_view.raise_for_access.side_effect = _access_denied_exc()
+
+    with patch(
+        "superset.mcp_service.semantic_layer.tool.list_metrics.SemanticViewDAO"
+    ) as mock_view_dao:
+        mock_view_dao.find_by_id.return_value = mock_view
+
+        async with Client(mcp_server) as client:
+            result = await client.call_tool(
+                "list_metrics",
+                {"request": {"view_id": 5}},
+            )
+        data = json.loads(result.content[0].text)
+
+    assert data["success"] is False
+    assert data["error_type"] == "AccessDenied"
+
+
+@pytest.mark.asyncio
+async def test_list_metrics_external_per_metric_compatible_dimensions(
+    mcp_server: FastMCP,
+) -> None:
+    """External metrics resolve compatible_dimensions per metric, not view-wide."""
+    mock_view = _make_view(5)
+
+    def _compatible_dimensions(
+        selected_metrics: list[str], selected_dimensions: list[str]
+    ) -> list[str]:
+        return ["listing__country_name"] if selected_metrics == ["bookings"] else []
+
+    mock_view.get_compatible_dimensions.side_effect = _compatible_dimensions
+
+    with patch(
+        "superset.mcp_service.semantic_layer.tool.list_metrics.SemanticViewDAO"
+    ) as mock_view_dao:
+        mock_view_dao.find_by_id.return_value = mock_view
+
+        async with Client(mcp_server) as client:
+            result = await client.call_tool(
+                "list_metrics",
+                {"request": {"view_id": 5, "include_compatible_dimensions": True}},
+            )
+        data = json.loads(result.content[0].text)
+
+    assert data["success"] is True
+    metrics = {m["name"]: m for m in data["metrics"]}
+    assert [d["name"] for d in metrics["bookings"]["compatible_dimensions"]] == [
+        "listing__country_name"
+    ]
+    assert metrics["revenue"]["compatible_dimensions"] == []
+    assert mock_view.get_compatible_dimensions.call_args_list == [
+        call(["bookings"], []),
+        call(["revenue"], []),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_metrics_pagination_is_stable(mcp_server: FastMCP) -> None:
+    """Metrics are sorted deterministically before pagination is applied."""
+    mock_ds = MagicMock()
+    mock_ds.id = 1
+    mock_ds.table_name = "table_1"
+    mock_ds.metrics = [_make_metric("zzz_metric"), _make_metric("aaa_metric")]
+    mock_ds.columns = []
+
+    with (
+        patch(
+            "superset.mcp_service.semantic_layer.tool.list_metrics.DatasetDAO"
+        ) as mock_dao,
+        patch(
+            "superset.mcp_service.semantic_layer.tool.list_metrics.SemanticViewDAO"
+        ) as mock_view_dao,
+        patch("superset.mcp_service.semantic_layer.tool.list_metrics.db") as mock_db,
+    ):
+        mock_view_dao.find_accessible.return_value = []
+        mock_query = MagicMock()
+        mock_db.session.query.return_value.options.return_value = mock_query
+        mock_dao._apply_base_filter.return_value = mock_query
+        mock_query.all.return_value = [mock_ds]
+
+        async with Client(mcp_server) as client:
+            page_1 = await client.call_tool(
+                "list_metrics", {"request": {"page": 1, "page_size": 1}}
+            )
+            page_2 = await client.call_tool(
+                "list_metrics", {"request": {"page": 2, "page_size": 1}}
+            )
+        data_1 = json.loads(page_1.content[0].text)
+        data_2 = json.loads(page_2.content[0].text)
+
+    assert data_1["metrics"][0]["name"] == "aaa_metric"
+    assert data_2["metrics"][0]["name"] == "zzz_metric"

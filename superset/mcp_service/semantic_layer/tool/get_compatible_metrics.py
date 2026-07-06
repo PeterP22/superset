@@ -131,7 +131,10 @@ async def get_compatible_metrics(
                     error_type="NotFound",
                 )
 
-            # All metrics on a SQL dataset are always mutually compatible.
+            # All metrics on a SQL dataset are always mutually compatible;
+            # exclude ones already selected so clients don't get duplicate
+            # suggestions for metrics they've already added.
+            selected_metrics = set(request.selected_metrics)
             compatible = [
                 MetricInfo(
                     name=m.metric_name,
@@ -145,6 +148,7 @@ async def get_compatible_metrics(
                     dataset_name=dataset.table_name,
                 )
                 for m in dataset.metrics
+                if m.metric_name not in selected_metrics
             ]
 
             await ctx.info("Compatible metrics (builtin): count=%d" % len(compatible))

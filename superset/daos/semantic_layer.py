@@ -207,21 +207,32 @@ class SemanticViewDAO(BaseDAO[SemanticView], AbstractSemanticViewDAO):
 
         Mirrors the permission filter in ``DatasourceDAO.build_semantic_view_query``
         to avoid per-row Python-level access checks when listing all views.
+
+        Eager-loads ``SemanticView.semantic_layer`` since callers commonly call
+        ``view.raise_for_access()`` per row, which reads ``view.semantic_layer.perm``
+        and would otherwise trigger a lazy-load query per view (N+1).
         """
         from sqlalchemy import or_
+        from sqlalchemy.orm import contains_eager, joinedload
 
         query = db.session.query(SemanticView)
         if not security_manager.can_access_all_datasources():
             perms = security_manager.user_view_menu_names("datasource_access")
-            query = query.join(
-                SemanticLayer,
-                SemanticLayer.uuid == SemanticView.semantic_layer_uuid,
-            ).filter(
-                or_(
-                    SemanticView.perm.in_(perms),
-                    SemanticLayer.perm.in_(perms),
+            query = (
+                query.join(
+                    SemanticLayer,
+                    SemanticLayer.uuid == SemanticView.semantic_layer_uuid,
+                )
+                .options(contains_eager(SemanticView.semantic_layer))
+                .filter(
+                    or_(
+                        SemanticView.perm.in_(perms),
+                        SemanticLayer.perm.in_(perms),
+                    )
                 )
             )
+        else:
+            query = query.options(joinedload(SemanticView.semantic_layer))
         return query.all()
 
     @classmethod

@@ -232,3 +232,59 @@ def test_find_accessible_returns_empty_when_no_perms_granted(
     results = SemanticViewDAO.find_accessible()
 
     assert results == []
+
+
+def test_find_accessible_eager_loads_semantic_layer_unfiltered(
+    session_with_accessible_views: Session,
+    mocker: MockerFixture,
+) -> None:
+    """When unfiltered (can_access_all_datasources), semantic_layer is still
+    eager-loaded, since callers commonly call view.raise_for_access() per row,
+    which reads view.semantic_layer.perm and would otherwise trigger an N+1.
+    """
+    from sqlalchemy import inspect
+
+    from superset.daos.semantic_layer import SemanticViewDAO
+
+    mocker.patch(
+        "superset.daos.semantic_layer.security_manager.can_access_all_datasources",
+        return_value=True,
+    )
+
+    results = SemanticViewDAO.find_accessible()
+
+    assert results
+    assert all("semantic_layer" not in inspect(v).unloaded for v in results)
+
+
+def test_find_accessible_eager_loads_semantic_layer_filtered(
+    session_with_accessible_views: Session,
+    mocker: MockerFixture,
+) -> None:
+    """When permission-filtered, the join is reused via contains_eager instead
+    of triggering a separate lazy-load per row for semantic_layer.
+    """
+    from sqlalchemy import inspect
+
+    from superset.daos.semantic_layer import SemanticViewDAO
+    from superset.semantic_layers.models import SemanticLayer
+
+    layer_a = (
+        session_with_accessible_views.query(SemanticLayer)
+        .filter_by(name="layer_a")
+        .one()
+    )
+
+    mocker.patch(
+        "superset.daos.semantic_layer.security_manager.can_access_all_datasources",
+        return_value=False,
+    )
+    mocker.patch(
+        "superset.daos.semantic_layer.security_manager.user_view_menu_names",
+        return_value={layer_a.perm},
+    )
+
+    results = SemanticViewDAO.find_accessible()
+
+    assert results
+    assert all("semantic_layer" not in inspect(v).unloaded for v in results)

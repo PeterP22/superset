@@ -162,11 +162,14 @@ def _resolve_external_view(
         if dttm_cols:
             time_col = dttm_cols[0].column_name
         else:
-            warnings.append(
-                "time_range provided but no datetime dimension found; "
-                "time filter will not be applied."
+            return SemanticLayerError.create(
+                error=(
+                    f"time_range was provided but view '{display_name}' has "
+                    "no datetime dimension. Set time_column explicitly or "
+                    "omit time_range."
+                ),
+                error_type="ValidationError",
             )
-            time_col = None
     if time_col is not None and time_col not in valid_dttm_columns:
         return SemanticLayerError.create(
             error=_time_column_error(time_col, valid_columns, display_name, "view"),

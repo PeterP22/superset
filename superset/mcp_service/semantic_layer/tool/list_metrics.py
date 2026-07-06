@@ -28,6 +28,7 @@ from superset_core.mcp.decorators import tool, ToolAnnotations
 
 from superset.daos.dataset import DatasetDAO
 from superset.daos.semantic_layer import SemanticViewDAO
+from superset.exceptions import SupersetSecurityException
 from superset.extensions import db, event_logger
 from superset.mcp_service.privacy import (
     DATA_MODEL_METADATA_ERROR_TYPE,
@@ -151,27 +152,23 @@ async def _collect_external_metrics(
 
     await ctx.debug("Found %d semantic views to scan for metrics" % len(views))
 
+    # Explicit single-view lookups aren't pre-filtered like find_accessible(),
+    # so raise_for_access must run outside the broad except block below so
+    # access errors are never silently swallowed as "could not load metrics".
+    check_access = request.view_id is not None
+
     results: list[MetricInfo] = []
     for view in views:
-        # raise_for_access must be called outside the broad except block below
-        # so that auth errors are never silently swallowed.
-        view.raise_for_access()
+        if check_access:
+            view.raise_for_access()
         try:
             raw_metrics = view.metrics
-            raw_cols = view.columns if request.include_compatible_dimensions else []
-            compat_dims = [
-                DimensionInfo(
-                    name=col.column_name,
-                    verbose_name=col.verbose_name,
-                    description=col.description,
-                    type=col.type,
-                    is_dttm=col.is_dttm,
-                    groupby=col.groupby,
-                    filterable=col.filterable,
-                    source="external",
+            all_cols = {
+                col.column_name: col
+                for col in (
+                    view.columns if request.include_compatible_dimensions else []
                 )
-                for col in raw_cols
-            ]
+            }
             for metric in raw_metrics:
                 name = metric.metric_name or ""
                 desc = metric.description or ""
@@ -180,6 +177,37 @@ async def _collect_external_metrics(
                     or _matches_search(desc, request.search)
                 ):
                     continue
+                compat_dims: list[DimensionInfo] = []
+                if request.include_compatible_dimensions:
+                    # Unlike built-in SQL datasets, external views enforce
+                    # per-metric compatibility, so dimensions must be resolved
+                    # per metric rather than reused across all metrics.
+                    compatible_names = view.get_compatible_dimensions([name], [])
+                    compat_dims = [
+                        DimensionInfo(
+                            name=dim_name,
+                            verbose_name=all_cols[dim_name].verbose_name
+                            if dim_name in all_cols
+                            else None,
+                            description=all_cols[dim_name].description
+                            if dim_name in all_cols
+                            else None,
+                            type=all_cols[dim_name].type
+                            if dim_name in all_cols
+                            else None,
+                            is_dttm=all_cols[dim_name].is_dttm
+                            if dim_name in all_cols
+                            else False,
+                            groupby=all_cols[dim_name].groupby
+                            if dim_name in all_cols
+                            else True,
+                            filterable=all_cols[dim_name].filterable
+                            if dim_name in all_cols
+                            else True,
+                            source="external",
+                        )
+                        for dim_name in compatible_names
+                    ]
                 results.append(
                     MetricInfo(
                         name=name,
@@ -266,6 +294,12 @@ async def list_metrics(
             all_metrics.extend(external)
             await ctx.debug("Collected %d external metrics" % len(external))
 
+        # Sort deterministically before paginating so that page boundaries
+        # are stable across calls instead of depending on collection order.
+        all_metrics.sort(
+            key=lambda m: (m.source, m.dataset_id or m.view_id or 0, m.name)
+        )
+
         total_count = len(all_metrics)
         total_pages = max(1, (total_count + request.page_size - 1) // request.page_size)
         start = (request.page - 1) * request.page_size
@@ -282,6 +316,13 @@ async def list_metrics(
             page=request.page,
             page_size=request.page_size,
             total_pages=total_pages,
+        )
+
+    except SupersetSecurityException as exc:
+        await ctx.error("Access denied: %s" % str(exc))
+        return SemanticLayerError.create(
+            error=str(exc.error.message),
+            error_type="AccessDenied",
         )
 
     except Exception as exc:
