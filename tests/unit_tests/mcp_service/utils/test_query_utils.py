@@ -52,9 +52,12 @@ class TestValidateNames:
 
     def test_multiple_unknown_names_produce_multiple_errors(self):
         """Should produce one error per unknown name."""
-        errors = validate_names(["revenue", "bogus_metric"], {"revenue"}, "metric")
-        assert len(errors) == 1
-        assert "bogus_metric" in errors[0]
+        errors = validate_names(
+            ["revenue", "bogus_metric", "zzz_unknown"], {"revenue"}, "metric"
+        )
+        assert len(errors) == 2
+        assert any("bogus_metric" in e for e in errors)
+        assert any("zzz_unknown" in e for e in errors)
 
     def test_error_message_uses_provided_kind(self):
         """Should label errors with the caller-provided 'kind' string."""
