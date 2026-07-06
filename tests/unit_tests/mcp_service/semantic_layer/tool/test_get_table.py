@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import importlib
 from collections.abc import Generator
+from types import ModuleType
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
@@ -31,7 +32,7 @@ from superset.exceptions import SupersetSecurityException
 from superset.mcp_service.app import mcp
 from superset.utils import json
 
-get_table_module = importlib.import_module(
+get_table_module: ModuleType = importlib.import_module(
     "superset.mcp_service.semantic_layer.tool.get_table"
 )
 

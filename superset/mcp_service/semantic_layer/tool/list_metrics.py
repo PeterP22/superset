@@ -41,6 +41,7 @@ from superset.mcp_service.semantic_layer.schemas import (
     MetricList,
     SemanticLayerError,
 )
+from superset.semantic_layers.models import SemanticView
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +82,7 @@ def _collect_builtin_metrics(request: ListMetricsRequest) -> list[MetricInfo]:
 
             from superset.connectors.sqla.models import SqlaTable
 
-            dataset = DatasetDAO.find_by_id(
+            dataset: SqlaTable | None = DatasetDAO.find_by_id(
                 request.dataset_id,
                 query_options=[
                     subqueryload(SqlaTable.columns),
@@ -141,7 +142,7 @@ async def _collect_external_metrics(
     """Collect metrics from external SemanticView models."""
     with event_logger.log_context(action="mcp.list_metrics.external_query"):
         if request.view_id is not None:
-            view = SemanticViewDAO.find_by_id(request.view_id)
+            view: SemanticView | None = SemanticViewDAO.find_by_id(request.view_id)
             views = [view] if view else []
         else:
             # find_accessible filters at SQL level, avoiding a per-row

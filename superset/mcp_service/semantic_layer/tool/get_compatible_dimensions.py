@@ -139,7 +139,7 @@ async def get_compatible_dimensions(
 
             # For built-in datasets all groupby columns are always compatible;
             # there's no per-metric compatibility constraint at the SQL level.
-            dims = [
+            dims: list[DimensionInfo] = [
                 DimensionInfo(
                     name=col.column_name,
                     verbose_name=col.verbose_name or None,
@@ -165,6 +165,7 @@ async def get_compatible_dimensions(
         # ------------------------------------------------------------------
         from superset.daos.semantic_layer import SemanticViewDAO
         from superset.exceptions import SupersetSecurityException
+        from superset.semantic_layers.models import ColumnMetadata
 
         view_id: int = request.view_id  # type: ignore[assignment]
         with event_logger.log_context(action="mcp.get_compatible_dimensions.external"):
@@ -184,13 +185,15 @@ async def get_compatible_dimensions(
                 error_type="AccessDenied",
             )
 
-        compatible_names = view.get_compatible_dimensions(
+        compatible_names: list[str] = view.get_compatible_dimensions(
             request.selected_metrics,
             request.selected_dimensions,
         )
 
         # Enrich with full column metadata
-        all_cols = {col.column_name: col for col in view.columns}
+        all_cols: dict[str, ColumnMetadata] = {
+            col.column_name: col for col in view.columns
+        }
         dims = [
             DimensionInfo(
                 name=name,

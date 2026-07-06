@@ -34,7 +34,7 @@ from superset_core.mcp.decorators import tool, ToolAnnotations
 from superset.commands.exceptions import CommandException
 from superset.exceptions import OAuth2Error, OAuth2RedirectError, SupersetException
 from superset.extensions import event_logger
-from superset.mcp_service.chart.schemas import PerformanceMetadata
+from superset.mcp_service.chart.schemas import DataColumn, PerformanceMetadata
 from superset.mcp_service.dataset.schemas import (
     DatasetError,
     QueryDatasetFilter,
@@ -360,7 +360,7 @@ async def query_dataset(  # noqa: C901
                 warnings=warnings,
             )
 
-        columns_meta = format_data_columns(data, raw_columns)
+        columns_meta: list[DataColumn] = format_data_columns(data, raw_columns)
 
         cache_status = get_cache_status_from_result(
             query_result, force_refresh=request.force_refresh
