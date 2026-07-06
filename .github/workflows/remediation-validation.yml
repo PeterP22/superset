@@ -1,0 +1,160 @@
+# Purpose-built validation gate for this fork (Devin CVE-remediation pipeline).
+#
+# Superset's full upstream CI (~45 workflows, ~2h) is intentionally REPLACED by
+# this targeted gate scoped to each fix. In a real engagement this plugs into
+# the customer's existing CI instead.
+#
+# Contract — every remediation PR must declare in its body:
+#   Remediation-CVE: <CVE-..., GHSA-..., or PYSEC-... id>
+#   Validation-Tests: <pytest paths under tests/, e.g. tests/unit_tests/utils>
+#
+# Three objective checks (an issue only counts as remediated when all pass,
+# plus human merge, plus the next scheduled scan confirming the finding gone):
+#   1. cve-rescan     — pip-audit no longer reports the declared CVE
+#   2. targeted-tests — the declared pytest scope passes in the same env as
+#                       upstream CI (reuses Superset's setup-backend action)
+#   3. lint-changed   — ruff on the python files this PR touches
+name: remediation-validation
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: remediation-validation-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    name: Parse remediation contract
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      cve: ${{ steps.parse.outputs.cve }}
+      tests: ${{ steps.parse.outputs.tests }}
+    steps:
+      - name: Parse and validate PR body
+        id: parse
+        # PR bodies are attacker-influenceable input: values are strictly
+        # validated here and consumed via env vars downstream — never
+        # interpolated into shell via ${{ }}.
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          cve=$(printf '%s\n' "$PR_BODY" | grep -ioE '^Remediation-CVE:[[:space:]]*[A-Za-z0-9-]+' | head -1 | sed 's/^[^:]*:[[:space:]]*//')
+          tests=$(printf '%s\n' "$PR_BODY" | grep -iE '^Validation-Tests:' | head -1 | sed 's/^[^:]*:[[:space:]]*//' | tr -d '\r')
+
+          if [ -z "$cve" ]; then
+            echo "::error::PR body must declare 'Remediation-CVE: <id>'"
+            exit 1
+          fi
+          if ! printf '%s' "$cve" | grep -qiE '^(CVE|GHSA|PYSEC)-[A-Za-z0-9-]+$'; then
+            echo "::error::Invalid vulnerability id: $cve"
+            exit 1
+          fi
+          if [ -z "$tests" ]; then
+            echo "::error::PR body must declare 'Validation-Tests: <pytest paths>'"
+            exit 1
+          fi
+          # pytest args restricted to paths under tests/ and safe characters
+          for tok in $tests; do
+            case "$tok" in
+              tests/*) ;;
+              *) echo "::error::Validation-Tests tokens must be paths under tests/ (got: $tok)"; exit 1 ;;
+            esac
+            if printf '%s' "$tok" | grep -q '[^A-Za-z0-9_/.:-]'; then
+              echo "::error::Unsafe character in Validation-Tests token: $tok"; exit 1
+            fi
+          done
+
+          echo "cve=$cve" >> "$GITHUB_OUTPUT"
+          echo "tests=$tests" >> "$GITHUB_OUTPUT"
+          echo "Contract OK — CVE: $cve · Tests: $tests"
+
+  cve-rescan:
+    name: Re-scan — declared CVE must be gone
+    needs: contract
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install pip-audit
+        run: pip install pip-audit
+      - name: Audit pinned requirements from this PR's head
+        env:
+          CVE: ${{ needs.contract.outputs.cve }}
+        run: |
+          # pip-audit exits nonzero whenever ANY vuln exists; other known CVEs
+          # may legitimately remain (they have their own issues/PRs). The gate
+          # for THIS PR is only that the declared CVE is no longer reported.
+          pip-audit --no-deps -r requirements/base.txt -f json -o audit-base.json || true
+          pip-audit --no-deps -r requirements/development.txt -f json -o audit-dev.json || true
+          if grep -qi "$CVE" audit-base.json audit-dev.json; then
+            echo "::error::$CVE is still reported by pip-audit — remediation not effective"
+            grep -i "$CVE" audit-base.json audit-dev.json || true
+            exit 1
+          fi
+          echo "$CVE no longer reported ✓"
+
+  targeted-tests:
+    name: Targeted tests (declared scope)
+    needs: contract
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      PYTHONPATH: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - name: Setup backend (same env as upstream CI)
+        uses: ./.github/actions/setup-backend/
+        with:
+          python-version: "current"
+      - name: Run declared pytest scope
+        env:
+          SUPERSET_TESTENV: true
+          SUPERSET_SECRET_KEY: not-a-secret
+          TESTS: ${{ needs.contract.outputs.tests }}
+        run: |
+          pytest --durations-min=0.5 --maxfail=20 --cache-clear $TESTS
+
+  lint-changed:
+    name: Lint changed python files
+    needs: contract
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Compute changed python files
+        id: changed
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          git fetch --depth=1 origin "$BASE_SHA" "$HEAD_SHA"
+          files=$(git diff --name-only --diff-filter=ACMR "$BASE_SHA" "$HEAD_SHA" -- '*.py' | tr '\n' ' ')
+          echo "files=$files" >> "$GITHUB_OUTPUT"
+          echo "Changed python files: ${files:-<none>}"
+      - uses: actions/setup-python@v5
+        if: steps.changed.outputs.files != ''
+        with:
+          python-version: "3.11"
+      - name: Ruff on changed files
+        if: steps.changed.outputs.files != ''
+        env:
+          FILES: ${{ steps.changed.outputs.files }}
+        run: |
+          pip install ruff
+          ruff check $FILES
