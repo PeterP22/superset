@@ -92,11 +92,15 @@ jobs:
         env:
           CVE: ${{ needs.contract.outputs.cve }}
         run: |
+          # Strip editable/local lines (e.g. `-e ./superset-core`) — they are
+          # not PyPI deps and force pip-audit out of --no-deps mode.
+          grep -E '^[A-Za-z0-9_.-]+(\[[A-Za-z0-9_,-]+\])?==' requirements/base.txt > /tmp/base-pins.txt
+          grep -E '^[A-Za-z0-9_.-]+(\[[A-Za-z0-9_,-]+\])?==' requirements/development.txt > /tmp/dev-pins.txt
           # pip-audit exits nonzero whenever ANY vuln exists; other known CVEs
           # may legitimately remain (they have their own issues/PRs). The gate
           # for THIS PR is only that the declared CVE is no longer reported.
-          pip-audit --no-deps -r requirements/base.txt -f json -o audit-base.json || true
-          pip-audit --no-deps -r requirements/development.txt -f json -o audit-dev.json || true
+          pip-audit --no-deps -r /tmp/base-pins.txt -f json -o audit-base.json || true
+          pip-audit --no-deps -r /tmp/dev-pins.txt -f json -o audit-dev.json || true
           if grep -qi "$CVE" audit-base.json audit-dev.json; then
             echo "::error::$CVE is still reported by pip-audit — remediation not effective"
             grep -i "$CVE" audit-base.json audit-dev.json || true
