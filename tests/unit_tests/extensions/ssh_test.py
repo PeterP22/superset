@@ -41,7 +41,12 @@ from paramiko import (
 from superset.commands.database.ssh_tunnel.exceptions import (
     SSHTunnelHostKeyVerificationError,
 )
-from superset.extensions.ssh import SSHManager, SSHManagerFactory
+from superset.extensions.ssh import (
+    _DISABLED_ALGORITHMS,
+    _SSHTunnelForwarder,
+    SSHManager,
+    SSHManagerFactory,
+)
 
 
 def _make_manager(strict: bool = False) -> SSHManager:
@@ -130,14 +135,16 @@ def test_create_tunnel_accepts_ed25519_private_key() -> None:
     manager = _make_manager()
     ssh_tunnel = _make_ssh_tunnel(_make_ed25519_pem())
 
-    with patch("superset.extensions.ssh.sshtunnel.open_tunnel") as mock_open:
+    with patch("superset.extensions.ssh._SSHTunnelForwarder") as mock_cls:
         manager.create_tunnel(
             ssh_tunnel, "postgresql://user:pass@db.example.com:5432/x"
         )
 
     # Key-type-agnostic loader must produce a paramiko PKey usable as ssh_pkey.
-    assert mock_open.called, "open_tunnel was never invoked — key parsing aborted"
-    forwarded_pkey = mock_open.call_args.kwargs["ssh_pkey"]
+    assert mock_cls.called, (
+        "_SSHTunnelForwarder was never invoked — key parsing aborted"
+    )
+    forwarded_pkey = mock_cls.call_args.kwargs["ssh_pkey"]
     assert isinstance(forwarded_pkey, Ed25519Key)
 
 
@@ -161,13 +168,15 @@ def test_create_tunnel_accepts_rsa_private_key_unchanged() -> None:
     manager = _make_manager()
     ssh_tunnel = _make_ssh_tunnel(rsa_pem)
 
-    with patch("superset.extensions.ssh.sshtunnel.open_tunnel") as mock_open:
+    with patch("superset.extensions.ssh._SSHTunnelForwarder") as mock_cls:
         manager.create_tunnel(
             ssh_tunnel, "postgresql://user:pass@db.example.com:5432/x"
         )
 
-    assert mock_open.called, "open_tunnel was never invoked — RSA key parsing aborted"
-    assert isinstance(mock_open.call_args.kwargs["ssh_pkey"], RSAKey)
+    assert mock_cls.called, (
+        "_SSHTunnelForwarder was never invoked — RSA key parsing aborted"
+    )
+    assert isinstance(mock_cls.call_args.kwargs["ssh_pkey"], RSAKey)
 
 
 def test_create_tunnel_accepts_ecdsa_private_key() -> None:
@@ -189,13 +198,15 @@ def test_create_tunnel_accepts_ecdsa_private_key() -> None:
     manager = _make_manager()
     ssh_tunnel = _make_ssh_tunnel(ecdsa_pem)
 
-    with patch("superset.extensions.ssh.sshtunnel.open_tunnel") as mock_open:
+    with patch("superset.extensions.ssh._SSHTunnelForwarder") as mock_cls:
         manager.create_tunnel(
             ssh_tunnel, "postgresql://user:pass@db.example.com:5432/x"
         )
 
-    assert mock_open.called, "open_tunnel was never invoked — ECDSA key parsing aborted"
-    assert isinstance(mock_open.call_args.kwargs["ssh_pkey"], ECDSAKey)
+    assert mock_cls.called, (
+        "_SSHTunnelForwarder was never invoked — ECDSA key parsing aborted"
+    )
+    assert isinstance(mock_cls.call_args.kwargs["ssh_pkey"], ECDSAKey)
 
 
 def test_create_tunnel_passphrase_protected_key_without_password() -> None:
@@ -218,13 +229,13 @@ def test_create_tunnel_passphrase_protected_key_without_password() -> None:
     manager = _make_manager()
     ssh_tunnel = _make_ssh_tunnel(encrypted_pem, private_key_password=None)
 
-    with patch("superset.extensions.ssh.sshtunnel.open_tunnel") as mock_open:
+    with patch("superset.extensions.ssh._SSHTunnelForwarder") as mock_cls:
         with pytest.raises(PasswordRequiredException):
             manager.create_tunnel(
                 ssh_tunnel, "postgresql://user:pass@db.example.com:5432/x"
             )
 
-    assert not mock_open.called
+    assert not mock_cls.called
 
 
 def test_create_tunnel_invalid_key_raises_combined_error() -> None:
@@ -236,7 +247,7 @@ def test_create_tunnel_invalid_key_raises_combined_error() -> None:
     manager = _make_manager()
     ssh_tunnel = _make_ssh_tunnel("not a valid private key")
 
-    with patch("superset.extensions.ssh.sshtunnel.open_tunnel") as mock_open:
+    with patch("superset.extensions.ssh._SSHTunnelForwarder") as mock_cls:
         with pytest.raises(SSHException) as exc_info:
             manager.create_tunnel(
                 ssh_tunnel, "postgresql://user:pass@db.example.com:5432/x"
@@ -246,7 +257,7 @@ def test_create_tunnel_invalid_key_raises_combined_error() -> None:
     assert "Ed25519Key" in message
     assert "ECDSAKey" in message
     assert "RSAKey" in message
-    assert not mock_open.called
+    assert not mock_cls.called
 
 
 @patch("superset.extensions.ssh.socket.create_connection")
@@ -269,7 +280,10 @@ def test_verify_host_key_match(
     mock_create_connection.assert_called_once_with(
         ("ssh.example.com", 22), timeout=321.0
     )
-    mock_transport_cls.assert_called_once_with(mock_create_connection.return_value)
+    mock_transport_cls.assert_called_once_with(
+        mock_create_connection.return_value,
+        disabled_algorithms=_DISABLED_ALGORITHMS,
+    )
     transport.start_client.assert_called_once()
     transport.close.assert_called_once()
     # The parsed expected key is returned so the caller can pin it on the tunnel.
@@ -358,7 +372,10 @@ def test_verify_host_key_match_ignores_comment_and_whitespace(
     mock_create_connection.assert_called_once_with(
         ("ssh.example.com", 22), timeout=321.0
     )
-    mock_transport_cls.assert_called_once_with(mock_create_connection.return_value)
+    mock_transport_cls.assert_called_once_with(
+        mock_create_connection.return_value,
+        disabled_algorithms=_DISABLED_ALGORITHMS,
+    )
     transport.start_client.assert_called_once()
     transport.close.assert_called_once()
 
@@ -382,13 +399,13 @@ def test_verify_host_key_unknown_key_type_raises() -> None:
         manager._verify_host_key(tunnel)
 
 
-@patch("superset.extensions.ssh.sshtunnel.open_tunnel")
+@patch("superset.extensions.ssh._SSHTunnelForwarder")
 @patch("superset.extensions.ssh.socket.create_connection")
 @patch("superset.extensions.ssh.paramiko.Transport")
 def test_create_tunnel_pins_verified_host_key(
     mock_transport_cls: Mock,
     mock_create_connection: Mock,
-    mock_open_tunnel: Mock,
+    mock_forwarder_cls: Mock,
 ) -> None:
     """A verified expected key is also pinned on the tunnel's own connection.
 
@@ -408,12 +425,12 @@ def test_create_tunnel_pins_verified_host_key(
 
     manager.create_tunnel(tunnel, "postgresql://u:p@db:5432/ex")
 
-    _, kwargs = mock_open_tunnel.call_args
+    _, kwargs = mock_forwarder_cls.call_args
     assert kwargs["ssh_host_key"] == server_key
 
 
-@patch("superset.extensions.ssh.sshtunnel.open_tunnel")
-def test_create_tunnel_without_host_key_does_not_pin(mock_open_tunnel: Mock) -> None:
+@patch("superset.extensions.ssh._SSHTunnelForwarder")
+def test_create_tunnel_without_host_key_does_not_pin(mock_forwarder_cls: Mock) -> None:
     # No expected key configured (non-strict): nothing is pinned, preserving the
     # prior behavior.
     manager = _make_manager(strict=False)
@@ -424,7 +441,7 @@ def test_create_tunnel_without_host_key_does_not_pin(mock_open_tunnel: Mock) -> 
 
     manager.create_tunnel(tunnel, "postgresql://u:p@db:5432/ex")
 
-    _, kwargs = mock_open_tunnel.call_args
+    _, kwargs = mock_forwarder_cls.call_args
     assert "ssh_host_key" not in kwargs
 
 
@@ -443,3 +460,64 @@ def test_ssh_tunnel_schema_round_trips_server_host_key() -> None:
     }
     loaded = DatabaseSSHTunnel().load(payload)
     assert loaded["server_host_key"] == authorized
+
+
+# ---------------------------------------------------------------------------
+# CVE-2026-44405  –  SHA-1 RSA signature mitigation tests
+# ---------------------------------------------------------------------------
+
+
+def test_disabled_algorithms_excludes_ssh_rsa() -> None:
+    """ssh-rsa (SHA-1) is excluded from both keys and pubkeys categories."""
+    assert "ssh-rsa" in _DISABLED_ALGORITHMS["keys"]
+    assert "ssh-rsa" in _DISABLED_ALGORITHMS["pubkeys"]
+
+
+@patch("superset.extensions.ssh.socket.create_connection")
+@patch("superset.extensions.ssh.paramiko.Transport")
+def test_verify_host_key_probe_disables_sha1(
+    mock_transport_cls: Mock, mock_create_connection: Mock
+) -> None:
+    """The host-key probe Transport is created with SHA-1 RSA disabled."""
+    server_key = paramiko.RSAKey.generate(2048)
+    manager = _make_manager(strict=False)
+    tunnel = _ssh_tunnel(_authorized_key(server_key))
+
+    transport = mock_transport_cls.return_value
+    transport.get_remote_server_key.return_value = server_key
+
+    manager._verify_host_key(tunnel)
+
+    mock_transport_cls.assert_called_once()
+    _, kwargs = mock_transport_cls.call_args
+    assert kwargs["disabled_algorithms"] == _DISABLED_ALGORITHMS
+
+
+def test_tunnel_forwarder_disables_sha1() -> None:
+    """_SSHTunnelForwarder injects disabled_algorithms on every Transport."""
+    forwarder = _SSHTunnelForwarder.__new__(_SSHTunnelForwarder)
+    mock_transport = Mock()
+    with patch.object(
+        sshtunnel.SSHTunnelForwarder,
+        "_get_transport",
+        return_value=mock_transport,
+    ):
+        transport = forwarder._get_transport()
+
+    assert transport.disabled_algorithms == _DISABLED_ALGORITHMS
+
+
+@patch("superset.extensions.ssh._SSHTunnelForwarder")
+def test_create_tunnel_uses_secure_forwarder(mock_forwarder_cls: Mock) -> None:
+    """create_tunnel routes through _SSHTunnelForwarder, not sshtunnel.open_tunnel."""
+    manager = _make_manager(strict=False)
+    tunnel = _ssh_tunnel(None)
+    tunnel.username = "user"
+    tunnel.password = "s3cret"  # noqa: S105
+    tunnel.private_key = None
+
+    manager.create_tunnel(tunnel, "postgresql://u:p@db:5432/ex")
+
+    mock_forwarder_cls.assert_called_once()
+    _, kwargs = mock_forwarder_cls.call_args
+    assert kwargs["ssh_password"] == "s3cret"  # noqa: S105

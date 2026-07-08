@@ -53,6 +53,13 @@ logger = logging.getLogger(__name__)
 # most permissive parser and the historical default in this codebase.
 _SSH_KEY_TYPES: tuple[type[PKey], ...] = (Ed25519Key, ECDSAKey, RSAKey)
 
+# CVE-2026-44405: paramiko accepts ssh-rsa (SHA-1) signatures by default.
+# Restrict to rsa-sha2-256 / rsa-sha2-512 which use SHA-2.
+_DISABLED_ALGORITHMS: dict[str, list[str]] = {
+    "keys": ["ssh-rsa"],
+    "pubkeys": ["ssh-rsa"],
+}
+
 
 def _load_private_key(pem: str, password: str | None) -> PKey:
     """Load a private key PEM regardless of algorithm (ed25519, ECDSA, RSA).
@@ -103,6 +110,26 @@ def _parse_authorized_key(authorized_key: str) -> paramiko.PKey:
         return paramiko.PKey.from_type_string(key_type, key_bytes)
     except (paramiko.SSHException, UnknownKeyType) as ex:
         raise ValueError(f"Host key could not be parsed: {ex}") from ex
+
+
+class _SSHTunnelForwarder(sshtunnel.SSHTunnelForwarder):
+    """Thin wrapper that disables SHA-1 RSA signatures on every Transport."""
+
+    def _get_transport(self) -> paramiko.Transport:
+        transport = super()._get_transport()
+        transport.disabled_algorithms = _DISABLED_ALGORITHMS
+        return transport
+
+
+def _open_tunnel(
+    **kwargs: object,
+) -> sshtunnel.SSHTunnelForwarder:
+    """Create a tunnel forwarder with SHA-1 RSA signatures disabled."""
+    debug_level = kwargs.pop("debug_level", None)
+    kwargs["logger"] = sshtunnel.create_logger(loglevel=debug_level)
+    forwarder = _SSHTunnelForwarder(**kwargs)
+    forwarder.skip_tunnel_checkup = True
+    return forwarder
 
 
 class SSHManager:
@@ -180,7 +207,9 @@ class SSHManager:
                 message=f"Could not connect to the SSH server: {ex}"
             ) from ex
 
-        transport = paramiko.Transport(sock)
+        transport = paramiko.Transport(
+            sock, disabled_algorithms=_DISABLED_ALGORITHMS
+        )
         try:
             transport.start_client(timeout=sshtunnel.SSH_TIMEOUT)
             remote_key = transport.get_remote_server_key()
@@ -250,7 +279,7 @@ class SSHManager:
                 ssh_tunnel.private_key, ssh_tunnel.private_key_password
             )
 
-        return sshtunnel.open_tunnel(**params)
+        return _open_tunnel(**params)
 
 
 class SSHManagerFactory:
